@@ -2,7 +2,7 @@
 name = "windFileManger"
 version = "0.1.0"
 edition = "2024"
-description = "windFileManger - 平铺式导航的轻量文件管理器（Rust + Slint，复刻 NanoFile 核心功能）"
+description = "windFileManger - 平铺式导航的轻量文件管理器"
 
 [dependencies]
 slint = "1.13.1"
