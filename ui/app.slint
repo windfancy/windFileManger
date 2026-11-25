@@ -1,0 +1,1948 @@
+// windFileManger 主界面 —— 平铺导航（无目录树）：侧边栏平铺 + 面包屑 + 当前目录平面列表
+import { ListView, ComboBox, LineEdit, ScrollView, Palette } from "std-widgets.slint";
+// Palette 导出后 Rust 侧可设置 color-scheme（std-widgets 深色模式跟随 Theme.mode）
+export { Palette }
+
+// ---------- 数据结构 ----------
+
+export struct EntryData {
+    name: string,
+    path: string,
+    is-dir: bool,
+    size: float,        // 文件字节；目录恒 0
+    dir-size: float,    // 目录统计大小；-1 = 未完成
+    size-str: string,   // 显示用大小串（Rust 预格式化）
+    mtime: string,
+    mtime-sort: int,
+    ext: string,
+    category: int,
+    hidden: bool,
+    selected: bool,
+}
+
+export struct TabData {
+    id: int,
+    title: string,
+    active: bool,
+}
+
+export struct SideItem {
+    kind: int,   // 0 快速访问项 1 磁盘 2 收藏项 3 段头
+    label: string,
+    path: string,
+    free: float,
+    total: float,
+}
+
+export struct Crumb {
+    label: string,
+    path: string,
+}
+
+export struct GridRow {
+    items: [EntryData],
+}
+
+export struct BatchRow {
+    old: string,
+    new: string,
+    conflict: bool,   // 重名冲突
+    unchanged: bool,  // 名字未变化
+    error: string,    // 条目专属错误，空串=无
+}
+
+// 设置页：快捷键行（idx 对应动作下标）与后缀筛选行
+export struct HotkeyRow {
+    idx: int,
+    action: string,
+    key: string,
+}
+export struct ExtRow {
+    idx: int,
+    label: string,
+    exts: string,     // 分号分隔；空=全部
+}
+
+
+// ---------- 主题语义色（浅色/深色双模式；mode 由 Rust 按设置写入，跟随系统时 Rust 已换算） ----------
+export global Theme {
+    in property <int> mode;  // 0 浅色 1 深色
+    in property <color> bg: mode == 0 ? #FFFFFF : #1E1F24;
+    in property <color> panel: mode == 0 ? #F1F3F7 : #23252B;
+    in property <color> side-bg: mode == 0 ? #F6F7FA : #202127;
+    in property <color> header-bg: mode == 0 ? #FAFBFC : #23252B;
+    in property <color> input-bg: mode == 0 ? #F5F6F8 : #2A2D33;
+    in property <color> menu-bg: mode == 0 ? #FFFFFF : #2A2D33;
+    in property <color> card-bg: mode == 0 ? #FFFFFF : #2A2D33;
+    in property <color> tab-active-bg: mode == 0 ? #FFFFFF : #2E333B;
+    in property <color> checkbox-bg: mode == 0 ? #FFFFFF : #1E1F24;
+    in property <color> btn-bg: mode == 0 ? #FFFFFF : #2A2D33;
+    in property <color> border: mode == 0 ? #E8EAED : #3A3F47;
+    in property <color> border-light: mode == 0 ? #EEEFF2 : #33363C;
+    in property <color> hover-row: mode == 0 ? #F0F3F9 : #2B2F36;
+    in property <color> hover-soft: mode == 0 ? #E9EEF8 : #2E333B;
+    in property <color> pressed: mode == 0 ? #D5DDF0 : #3A4150;
+    in property <color> active-btn: mode == 0 ? #E3EBFA : #2E3E57;
+    in property <color> hover-crumb: mode == 0 ? #E4E9F4 : #33383F;
+    in property <color> tab-hover: mode == 0 ? #E3E7F0 : #2E333B;
+    in property <color> side-hover: mode == 0 ? #E6EBF5 : #2C313A;
+    in property <color> menu-hover: mode == 0 ? #EEF2FA : #33383F;
+    in property <color> btn-hover: mode == 0 ? #F0F2F6 : #33383F;
+    in property <color> selected: mode == 0 ? #D7E7FD : #26466E;
+    in property <color> fg: mode == 0 ? #202124 : #E8EAED;
+    in property <color> fg-secondary: mode == 0 ? #5F6368 : #BDC1C6;
+    in property <color> fg-muted: mode == 0 ? #9AA0A6 : #80868B;
+    in property <color> fg-hidden: mode == 0 ? #90949C : #7D8288;
+    in property <color> accent: #1A73E8;
+    in property <color> accent-hover: #1558C0;
+    in property <color> danger: mode == 0 ? #C5221F : #F28B82;
+    in property <color> checkbox-border: mode == 0 ? #9AA7C7 : #6E7B99;
+    in property <color> searchbar-bg: mode == 0 ? #FFF8E1 : #3A3320;
+    in property <color> searchbar-fg: mode == 0 ? #8A6D00 : #E3C36B;
+    in property <color> toast-ok-bg: mode == 0 ? #E6F4EA : #243729;
+    in property <color> toast-ok-border: mode == 0 ? #B7DFC0 : #3C6B4A;
+    in property <color> toast-ok-fg: mode == 0 ? #1E7E34 : #7FD08F;
+    in property <color> toast-err-bg: mode == 0 ? #FDECEC : #3B2424;
+    in property <color> toast-err-border: mode == 0 ? #F5C6C4 : #7A3A38;
+    in property <color> overlay: mode == 0 ? rgba(20, 24, 34, 100) : rgba(0, 0, 0, 150);
+    in property <color> disk-track: mode == 0 ? #E2E5EC : #3A3F47;
+}
+
+// ---------- 全局逻辑桥 ----------
+
+export global Logic {
+    // 模型
+    in-out property <[EntryData]> entries;
+    in-out property <[GridRow]> grid-rows;
+    in-out property <[EntryData]> search-results;
+    in-out property <[TabData]> tabs;
+    in-out property <[SideItem]> side-items;
+    in-out property <[Crumb]> crumbs;
+
+    // 状态
+    in-out property <bool> grid-view;
+    in-out property <bool> show-hidden;
+    in property <bool> searching;
+    in property <string> search-root;
+    in-out property <bool> search-active;
+    in-out property <bool> multi-mode;        // 多选模式（勾选框 + 全选框）
+    in-out property <int> search-ext-filter;  // 搜索后缀筛选（ext-filter-model 下标）
+    in-out property <string> search-input;    // 当前 tab 的搜索框文本（tab 级搜索）
+    in-out property <[string]> ext-filter-model;  // 后缀筛选下拉项（设置页可增删）
+    // 设置页（dialog-mode = 8）
+    in property <[HotkeyRow]> hotkey-rows;
+    in property <[ExtRow]> ext-rows;
+    in-out property <int> settings-theme;     // 0浅色 1深色 2跟随系统
+    in-out property <bool> settings-admin;    // 启动时管理员提示
+    in property <string> capture-action;      // 非空 = 正在为该动作名捕获新键位
+    in property <string> settings-error;      // 改键冲突等错误
+    callback hotkey-capture(int);             // 设置页快捷键行 → 进入捕获
+    callback ext-add(string, string);         // 添加后缀筛选 (名称, 扩展名)；编辑态(ext-edit-idx>=0)时为保存
+    callback ext-del(int);                    // 删除后缀筛选行
+    callback ext-edit(int);                   // 进入筛选行编辑态（回填输入框）
+    in-out property <int> ext-edit-idx: -1;   // 正在编辑的筛选行下标（-1=无）
+    callback settings-theme-changed(int);     // 色调即改即生效
+    callback settings-admin-changed(bool);    // 管理员提示开关
+    in-out property <string> settings-ext-label-input;  // 添加筛选项：名称
+    in-out property <string> settings-ext-input;        // 添加筛选项：扩展名
+    // 快捷键分派（键名串如 "F2"、"Ctrl+C"、"Delete"）
+    callback hotkey(string);
+    // 「聚焦搜索框」动作的键位（设置页可改；特判由前端聚焦 LineEdit）
+    in property <string> hk-focus-search;
+    // 多选批量解压（作用于当前选中集合）
+    callback batch-extract();
+    in-out property <string> current-path;
+    in-out property <int> sort-by;       // 0名称 1大小 2类型 3修改时间
+    in-out property <bool> sort-asc;
+    in-out property <int> status-count;
+    in-out property <int> status-selected;
+    in-out property <string> status-size;
+    in-out property <bool> preview-open;
+    in property <image> preview-image;
+    in property <string> preview-text;
+    in property <int> preview-kind;      // 0元信息 1文本 2图片
+    in property <string> preview-meta;
+    in-out property <int> dialog-mode;   // 0无 1重命名 2新建文件夹 3新建文件 4路径跳转 5批量重命名 6查看路径 7添加远程访问
+    in-out property <string> dialog-input;
+    in property <string> dialog-path;        // mode6 查看路径：完整路径
+    in-out property <string> dialog-input2;  // mode7 添加远程：显示名（可空）
+    in-out property <string> dialog-input3;  // mode7 添加远程：账号（可空）
+    in-out property <string> dialog-input4;  // mode7 添加远程：密码（可空）
+    callback copy-dialog-path();
+    callback remote-add(string, string, string, string); // (地址, 显示名, 账号, 密码)
+    // 全局 tooltip 浮层：ToolBtn 在根级浮层渲染，避免被后绘兄弟遮挡
+    in-out property <string> tip-text;
+    in-out property <length> tip-x;
+    in-out property <length> tip-y;
+    // 批量重命名（dialog-mode=5）
+    in property <[BatchRow]> batch-rows;
+    in property <string> batch-title;
+    in property <string> batch-error;    // 模板/参数错误（红字），空串=无错
+    in property <bool> batch-has-conflict; // 有冲突/错误行时应用被拒
+    in-out property <string> batch-start-input;
+    callback batch-preview(string, string); // (模板, 起始序号字符串)
+    callback batch-apply(string, string);
+    in property <string> toast;
+    in property <bool> has-toast;
+    in property <bool> toast-error;  // true=红色错误 / false=绿色成功
+    in property <bool> busy;
+
+    // 右键菜单
+    in property <int> menu-mode;         // 0 条目 1 背景 2 收藏项
+    in property <EntryData> menu-entry;
+    in property <string> menu-side-path;
+    in-out property <length> menu-x;
+    in-out property <length> menu-y;
+
+    // 导航
+    callback nav-back();
+    callback nav-forward();
+    callback nav-up();
+    callback refresh();
+    callback crumb-open(Crumb);
+    callback path-commit(string);
+
+    // 侧边栏 / 标签
+    callback sidebar-open(SideItem);
+    callback tab-new();
+    callback tab-close(int);
+    callback tab-select(int);
+
+    // 视图 / 排序
+    callback sort-changed(int);
+    callback sort-dir-toggle();
+    callback view-toggle();
+    callback hidden-toggle();
+    callback preview-toggle();
+
+    // 条目交互
+    callback entry-click(EntryData, bool);   // bool = ctrl
+    callback entry-open(EntryData);
+    callback entry-context(EntryData);       // 右键：已选中→保持整组选中；未选中→单选该行
+
+    // 文件操作
+    callback delete-selected();
+    callback copy-selected(bool);
+    callback batch-selected();
+    callback zip-selected(int);              // 工具栏压缩：13=ZIP / 14=tar.gz（作用于选中集合）
+    callback paste();
+    callback new-folder();
+    callback new-file();
+    callback favorite-add();
+    callback favorite-remove(string);
+    callback reveal-path(string);
+
+    // 对话框
+    callback dialog-ok(string);
+    callback dialog-cancel();
+
+    // 搜索
+    callback search-commit(string);
+    callback search-cancel();
+
+    // 多选模式
+    callback multi-toggle();             // 进入/退出多选模式（退出时清空选中）
+    callback multi-toggle-all(bool);     // 全选(true)/清空(false)，作用于当前活跃视图
+
+    // 菜单动作
+    callback menu-action(int);   // 见 main.rs
+
+    // 预览
+    callback preview-close();
+}
+
+// ---------- 通用小组件 ----------
+
+component ToolBtn inherits Rectangle {
+    in property <string> glyph;
+    in property <string> tip;
+    in property <bool> active;
+    callback clicked();
+    width: 30px;
+    height: 26px;
+    border-radius: 4px;
+    background: ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover-soft : (active ? Theme.active-btn : transparent));
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+        mouse-cursor: pointer;
+        // tooltip 上报到根级浮层（Logic.tip-*），由 Window 末尾的浮层元素渲染。
+        // 之前在按钮内部画浮层，会被工具栏/主区域里后绘的兄弟元素遮挡。
+        changed has-hover => {
+            if (self.has-hover && root.tip != "") {
+                Logic.tip-text = root.tip;
+                Logic.tip-x = self.absolute-position.x;
+                Logic.tip-y = self.absolute-position.y + self.height + 6px;
+            } else if (!self.has-hover && Logic.tip-text == root.tip) {
+                Logic.tip-text = "";
+            }
+        }
+    }
+    Text {
+        text: root.glyph;
+        font-size: 13px;
+        color: Theme.fg;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component MenuRow inherits Rectangle {
+    in property <string> label;
+    in property <bool> danger;
+    callback clicked();
+    height: 30px;
+    width: 100%;
+    background: t.has-hover ? (danger ? #FDECEC : Theme.menu-hover) : transparent;
+    t := TouchArea {
+        clicked => { root.clicked(); }
+        mouse-cursor: pointer;
+    }
+    Text {
+        x: 12px;
+        text: root.label;
+        font-size: 13px;
+        color: root.danger ? Theme.danger : Theme.fg;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// 列表视图条目行
+component EntryRow inherits Rectangle {
+    in property <EntryData> entry;
+    in property <bool> multi;   // 多选模式：显示勾选框，单击行即切换选中
+    callback clicked(bool);
+    callback open();
+    callback context(length, length);
+
+    height: 30px;
+    width: 100%;
+    background: entry.selected ? Theme.selected : (t.has-hover ? Theme.hover-row : transparent);
+
+    t := TouchArea {
+        pointer-event(pe) => {
+            if (pe.kind == PointerEventKind.up && pe.button == PointerEventButton.left) {
+                root.clicked(pe.modifiers.control || root.multi);
+            }
+            if (pe.kind == PointerEventKind.up && pe.button == PointerEventButton.right) {
+                root.context(
+                    self.absolute-position.x + self.pressed-x,
+                    self.absolute-position.y + self.pressed-y);
+            }
+        }
+        double-clicked => { root.open(); }
+        mouse-cursor: pointer;
+    }
+
+    HorizontalLayout {
+        x: 8px;
+        width: parent.width - 16px;
+        // 多选勾选框
+        if (root.multi) : Rectangle {
+            width: 20px;
+            ckb := Rectangle {
+                x: 1px;
+                y: 7px;
+                width: 16px;
+                height: 16px;
+                border-radius: 3px;
+                border-width: 1px;
+                border-color: entry.selected ? Theme.accent : Theme.checkbox-border;
+                background: entry.selected ? Theme.accent : Theme.checkbox-bg;
+                Text {
+                    text: "√";
+                    color: white;
+                    font-size: 12px;
+                    width: parent.width;
+                    height: parent.height;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    clicked => { root.clicked(true); }
+                    mouse-cursor: pointer;
+                }
+            }
+        }
+        // 图标 + 名称
+        Rectangle {
+            width: parent.width - (root.multi ? 376px : 348px);
+            HorizontalLayout {
+                spacing: 8px;
+                padding-left: 4px;
+                Text {
+                    width: 22px;
+                    text: root.icon-for(entry.category, entry.is-dir);
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: entry.name;
+                    font-size: 13px;
+                    color: entry.hidden ? Theme.fg-hidden : Theme.fg;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        Text {
+            width: 138px;
+            text: entry.mtime;
+            font-size: 12px;
+            color: Theme.fg-secondary;
+            vertical-alignment: center;
+        }
+        Text {
+            width: 100px;
+            text: entry.is-dir ? "文件夹" : (entry.ext == "" ? "文件" : entry.ext);
+            font-size: 12px;
+            color: Theme.fg-secondary;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        Text {
+            width: 90px;
+            text: entry.size-str;
+            font-size: 12px;
+            color: Theme.fg-secondary;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+    }
+
+    function icon-for(cat: int, is-dir: bool) -> string {
+        if (is-dir) { return "📁"; }
+        if (cat == 1) { return "🖼"; }
+        if (cat == 2) { return "🎬"; }
+        if (cat == 3) { return "🎵"; }
+        if (cat == 4) { return "📕"; }
+        if (cat == 5) { return "📄"; }
+        if (cat == 6) { return "📊"; }
+        if (cat == 7) { return "📐"; }
+        if (cat == 8) { return "📖"; }
+        if (cat == 9) { return "📝"; }
+        if (cat == 10) { return "💻"; }
+        if (cat == 11 || cat == 14) { return "⚙"; }
+        if (cat == 12) { return "🗃"; }
+        if (cat == 13) { return "📦"; }
+        return "📄";
+    }
+}
+
+// 宫格视图单元格
+component EntryCell inherits Rectangle {
+    in property <EntryData> entry;
+    in property <bool> multi;
+    callback clicked(bool);
+    callback open();
+    callback context(length, length);
+
+    height: 100%;
+    min-width: 90px;
+    background: entry.selected ? Theme.selected : (t.has-hover ? Theme.hover-row : transparent);
+    border-radius: 6px;
+
+    t := TouchArea {
+        pointer-event(pe) => {
+            if (pe.kind == PointerEventKind.up && pe.button == PointerEventButton.left) {
+                root.clicked(pe.modifiers.control || root.multi);
+            }
+            if (pe.kind == PointerEventKind.up && pe.button == PointerEventButton.right) {
+                root.context(
+                    self.absolute-position.x + self.pressed-x,
+                    self.absolute-position.y + self.pressed-y);
+            }
+        }
+        double-clicked => { root.open(); }
+        mouse-cursor: pointer;
+    }
+
+    VerticalLayout {
+        padding-top: 12px;
+        padding-bottom: 6px;
+        alignment: start;
+        Text {
+            text: root.icon-for(entry.category, entry.is-dir);
+            font-size: 30px;
+            horizontal-alignment: center;
+            height: 42px;
+        }
+        Text {
+            text: entry.name;
+            font-size: 12px;
+            color: entry.hidden ? Theme.fg-hidden : Theme.fg;
+            overflow: elide;
+            wrap: no-wrap;
+            horizontal-alignment: center;
+            height: 16px;
+        }
+    }
+
+    // 多选勾选框（左上角覆盖层，不参与布局）
+    if (root.multi) : Rectangle {
+        x: 4px;
+        y: 4px;
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: entry.selected ? Theme.accent : Theme.checkbox-border;
+        background: entry.selected ? Theme.accent : Theme.checkbox-bg;
+        Text {
+            text: "√";
+            color: white;
+            font-size: 12px;
+            width: parent.width;
+            height: parent.height;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            clicked => { root.clicked(true); }
+            mouse-cursor: pointer;
+        }
+    }
+
+    function icon-for(cat: int, is-dir: bool) -> string {
+        if (is-dir) { return "📁"; }
+        if (cat == 1) { return "🖼"; }
+        if (cat == 2) { return "🎬"; }
+        if (cat == 3) { return "🎵"; }
+        if (cat == 13) { return "📦"; }
+        if (cat == 10) { return "💻"; }
+        return "📄";
+    }
+}
+
+// 侧边栏条目
+component SideRow inherits Rectangle {
+    in property <SideItem> item;
+    callback clicked();
+    callback context(length, length);
+    height: 26px;
+    width: 100%;
+    background: t.has-hover ? Theme.side-hover : transparent;
+    t := TouchArea {
+        clicked => { root.clicked(); }
+        pointer-event(pe) => {
+            if (pe.kind == PointerEventKind.up && pe.button == PointerEventButton.right) {
+                root.context(
+                    self.absolute-position.x + self.pressed-x,
+                    self.absolute-position.y + self.pressed-y);
+            }
+        }
+        mouse-cursor: pointer;
+    }
+    HorizontalLayout {
+        x: 10px;
+        width: parent.width - 20px;
+        spacing: 6px;
+        Text {
+            width: 18px;
+            text: root.icon-for(item.kind, item.path);
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+        Text {
+            width: parent.width - 24px;
+            text: item.label;
+            font-size: 12px;
+            color: Theme.fg;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+    }
+    // 磁盘容量条
+    if (item.kind == 1 && item.total > 0) : Rectangle {
+        y: parent.height - 4px;
+        x: 30px;
+        width: parent.width - 44px;
+        height: 2px;
+        background: Theme.disk-track;
+        Rectangle {
+            width: parent.width * (1.0 - (item.free * 1.0 / item.total * 1.0));
+            background: item.free < 1073741824 ? #E37400 : #7BA7F0;
+        }
+    }
+    function icon-for(kind: int, path: string) -> string {
+        if (kind == 0) {
+            if (path.ends-with("Desktop")) { return "🖥"; }
+            if (path.ends-with("Downloads")) { return "⬇"; }
+            if (path.ends-with("Documents")) { return "📄"; }
+            if (path.ends-with("Pictures")) { return "🖼"; }
+            if (path.ends-with("Music")) { return "🎵"; }
+            if (path.ends-with("Videos")) { return "🎬"; }
+            return "📁";
+        }
+        if (kind == 1) { return "💾"; }
+        return "⭐";
+    }
+}
+
+// ---------- 主窗口 ----------
+
+export component AppWindow inherits Window {
+    title: "windFileManger";
+    // 关键：不能用显式 width/height——那会把布局尺寸绑定为常量，最大化后
+    // 内容区仍停在初始尺寸（大量留白）。preferred-* 只定初始大小，
+    // 实际 width/height 属性随窗口尺寸变化，布局自适应最大化。
+    preferred-width: 1180px;
+    preferred-height: 760px;
+    background: Theme.bg;
+    default-font-family: "Microsoft YaHei UI";
+    icon: @image-url("../assets/app_icon_preview.png");
+    forward-focus: ks;
+
+    // std-widgets（LineEdit/ComboBox 等）跟随色调模式（Rust 侧 apply_theme 调用）
+    public function apply-mode(dark: bool) {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    // 键名规范化：修饰键序 Ctrl+Alt+Shift+主键；特殊键转具名（与 Rust normalize_key 对齐）
+    function hotkey-name(t: string, ctrl: bool, alt: bool, shift: bool) -> string {
+        let name =
+            t == Key.Escape ? "Escape" :
+            t == Key.Delete ? "Delete" :
+            t == Key.Backspace ? "Backspace" :
+            t == Key.LeftArrow ? "Left" :
+            t == Key.RightArrow ? "Right" :
+            t == Key.UpArrow ? "Up" :
+            t == Key.DownArrow ? "Down" :
+            t == Key.Return ? "Return" :
+            t == Key.Home ? "Home" :
+            t == Key.End ? "End" :
+            t == Key.Insert ? "Insert" :
+            t == Key.PageUp ? "PageUp" :
+            t == Key.PageDown ? "PageDown" :
+            t == Key.F1 ? "F1" :
+            t == Key.F2 ? "F2" :
+            t == Key.F3 ? "F3" :
+            t == Key.F4 ? "F4" :
+            t == Key.F5 ? "F5" :
+            t == Key.F6 ? "F6" :
+            t == Key.F7 ? "F7" :
+            t == Key.F8 ? "F8" :
+            t == Key.F9 ? "F9" :
+            t == Key.F10 ? "F10" :
+            t == Key.F11 ? "F11" :
+            t == Key.F12 ? "F12" :
+            t;
+        return (ctrl ? "Ctrl+" : "") + (alt ? "Alt+" : "") + (shift ? "Shift+" : "") + name;
+    }
+
+    // 焦点归还：LineEdit/对话框交互后把键盘焦点交回快捷键捕获器
+    // （焦点不在 ks 时按键走焦点祖先链，ks 完全收不到——capture-key-pressed 也只沿焦点链触发）
+    public function refocus() {
+        ks.focus();
+    }
+
+    // 快捷键捕获（forward-focus 落焦；LineEdit/ComboBox 获得焦点期间不触发）
+    ks := FocusScope {
+        key-pressed(e) => {
+            // 设置页捕获态：下一击写入 "__cap:键名"（Rust 侧处理，Esc 取消）
+            if (Logic.capture-action != "") {
+                Logic.hotkey("__cap:" + hotkey-name(e.text, e.modifiers.control, e.modifiers.alt, e.modifiers.shift));
+                return accept;
+            }
+            let name = hotkey-name(e.text, e.modifiers.control, e.modifiers.alt, e.modifiers.shift);
+            if (name == Logic.hk-focus-search) {
+                search-edit.focus();
+                return accept;
+            }
+            Logic.hotkey(name);
+            return accept;
+        }
+    }
+
+    VerticalLayout {
+        // ---- 标签栏 ----
+        Rectangle {
+            height: 34px;
+            background: Theme.panel;
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                padding-top: 4px;
+                spacing: 4px;
+                tab-strip := Rectangle {
+                    HorizontalLayout {
+                        spacing: 4px;
+                        for tb in Logic.tabs: Rectangle {
+                            width: 150px;
+                            height: 30px;
+                            border-radius: 6px;
+                            background: tb.active ? Theme.tab-active-bg : (tab-t.has-hover ? Theme.tab-hover : transparent);
+                            tab-t := TouchArea {
+                                clicked => { Logic.tab-select(tb.id); }
+                                mouse-cursor: pointer;
+                            }
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 6px;
+                                spacing: 4px;
+                                Text {
+                                    // 150 - padding(10+6) - spacing 4 - ✕ 18 = 112 = 150-38
+                                    width: parent.width - 38px;
+                                    text: tb.title;
+                                    font-size: 12px;
+                                    color: tb.active ? Theme.accent : #444;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    border-radius: 9px;
+                                    background: xt.has-hover ? #D8DEE9 : transparent;
+                                    xt := TouchArea {
+                                        clicked => { Logic.tab-close(tb.id); }
+                                        mouse-cursor: pointer;
+                                    }
+                                    Text {
+                                        text: "×";
+                                        font-size: 10px;
+                                        color: Theme.fg-secondary;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ToolBtn {
+                    glyph: "＋";
+                    tip: "新建标签页";
+                    clicked => { Logic.tab-new(); }
+                    width: 26px;
+                    height: 24px;
+                }
+                Rectangle {} // 撑开
+            }
+        }
+
+        // ---- 工具栏 ----
+        Rectangle {
+            height: 40px;
+            background: Theme.bg;
+            border-width: 1px; border-color: Theme.border;
+            HorizontalLayout {
+                x: 0; y: 0;
+                width: parent.width;
+                height: parent.height;
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 4px;
+                ToolBtn { glyph: "←"; tip: "后退"; clicked => { Logic.nav-back(); } }
+                ToolBtn { glyph: "→"; tip: "前进"; clicked => { Logic.nav-forward(); } }
+                ToolBtn { glyph: "↑"; tip: "上级目录"; clicked => { Logic.nav-up(); } }
+                ToolBtn { glyph: "刷"; tip: "刷新"; clicked => { Logic.refresh(); } }
+                Rectangle { width: 6px; }
+
+                // 面包屑 / 路径编辑（弹性 2：搜索条占 1，避免路径条挤占全部宽度）
+                Rectangle {
+                    height: 28px;
+                    min-width: 120px;
+                    horizontal-stretch: 2;
+                    border-radius: 4px;
+                    background: Theme.input-bg;
+                    border-width: 1px; border-color: Theme.border;
+                    clip: true;
+                    HorizontalLayout {
+                        x: 8px;
+                        y: 3px;
+                        height: parent.height - 6px;
+                        width: parent.width - 36px;
+                        spacing: 1px;
+                        for c in Logic.crumbs: HorizontalLayout {
+                                spacing: 1px;
+                                Rectangle {
+                                    height: 22px;
+                                    border-radius: 3px;
+                                    background: cb.has-hover ? Theme.hover-crumb : transparent;
+                                    cb := TouchArea {
+                                        clicked => { Logic.crumb-open(c); }
+                                        mouse-cursor: pointer;
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 7px;
+                                        padding-right: 7px;
+                                        Text {
+                                            text: c.label;
+                                            font-size: 12px;
+                                            color: Theme.fg;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: "›";
+                                    font-size: 12px;
+                                    color: Theme.fg-muted;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    ToolBtn {
+                        x: parent.width - 28px;
+                        y: 2px;
+                        glyph: "跳";
+                        tip: "编辑路径";
+                        clicked => { Logic.dialog-mode = 4; }
+                        width: 24px;
+                        height: 22px;
+                    }
+                }
+                Rectangle { width: 6px; }
+
+                // 搜索框 + 常用后缀筛选（弹性 1：随窗口伸展，不再固定 200px）
+                Rectangle {
+                    min-width: 250px;
+                    horizontal-stretch: 1;
+                    height: 28px;
+                    border-radius: 4px;
+                    background: Theme.input-bg;
+                    border-width: 1px; border-color: Theme.border;
+                    HorizontalLayout {
+                        x: 2px;
+                        y: 2px;
+                        width: parent.width - 4px;
+                        height: parent.height - 4px;
+                        // Tab 级搜索：文本属于当前 tab，切 tab 由 Rust 回填
+                        search-edit := LineEdit {
+                            horizontal-stretch: 1;
+                            text <=> Logic.search-input;
+                            placeholder-text: "搜索（回车，限当前路径）";
+                            font-size: 12px;
+                            accepted(text) => { Logic.search-commit(text); }
+                        }
+                        if (Logic.searching) : ToolBtn {
+                            glyph: "×";
+                            tip: "取消搜索";
+                            width: 20px;
+                            height: 22px;
+                            clicked => { Logic.search-cancel(); }
+                        }
+                        ComboBox {
+                            width: 92px;
+                            height: 24px;
+                            model: Logic.ext-filter-model;
+                            current-index <=> Logic.search-ext-filter;
+                        }
+                    }
+                }
+                Rectangle { width: 6px; }
+
+                ToolBtn {
+                    glyph: "选";
+                    tip: "多选模式：显示勾选框与全选框，单击行即选中";
+                    active: Logic.multi-mode;
+                    clicked => { Logic.multi-toggle(); }
+                }
+                ToolBtn { glyph: "🗑"; tip: "删除到回收站"; clicked => { Logic.delete-selected(); } }
+                ToolBtn { glyph: "复"; tip: "复制"; clicked => { Logic.copy-selected(false); } }
+                ToolBtn { glyph: "✂"; tip: "剪切"; clicked => { Logic.copy-selected(true); } }
+                ToolBtn { glyph: "📋"; tip: "粘贴"; clicked => { Logic.paste(); } }
+                ToolBtn { glyph: "批"; tip: "批量重命名（Ctrl 多选后用）"; clicked => { Logic.batch-selected(); } }
+                ToolBtn { glyph: "压"; tip: "压缩选中项为一个 ZIP（多选可用；tar.gz 用右键菜单）"; clicked => { Logic.zip-selected(13); } }
+                ToolBtn { glyph: "📁＋"; tip: "新建文件夹"; clicked => { Logic.new-folder(); } width: 38px; }
+                ToolBtn { glyph: "📄＋"; tip: "新建文件"; clicked => { Logic.new-file(); } width: 38px; }
+                Rectangle { width: 6px; }
+
+                ToolBtn {
+                    glyph: Logic.grid-view ? "宫" : "列";
+                    tip: Logic.grid-view ? "切换到列表视图" : "切换到宫格视图";
+                    clicked => { Logic.view-toggle(); }
+                }
+                ToolBtn {
+                    glyph: "👁";
+                    tip: "显示隐藏文件";
+                    active: Logic.show-hidden;
+                    clicked => { Logic.hidden-toggle(); }
+                }
+                ToolBtn {
+                    glyph: "预";
+                    tip: "预览面板";
+                    active: Logic.preview-open;
+                    clicked => { Logic.preview-toggle(); }
+                }
+                ToolBtn {
+                    glyph: "设";
+                    tip: "设置（色调 / 快捷键 / 搜索筛选）";
+                    clicked => { Logic.dialog-mode = 8; }
+                }
+            }
+        }
+
+        // ---- 主区域（外层 Rectangle 便于预览面板做覆盖层，不参与布局）----
+        // min-height/min-width 显式解锁布局约束：裸弹性 Rectangle 的 min==max==0
+        // 会让 winit 把窗口创建为不可缩放（WS_THICKFRAME/WS_MAXIMIZEBOX 被去除）
+        Rectangle {
+        min-height: 200px;
+        HorizontalLayout {
+            x: 0; y: 0;
+            width: 100%;
+            height: 100%;
+            // 侧边栏（平铺，无树形）
+            Rectangle {
+                width: 200px;
+                background: Theme.side-bg;
+                border-width: 1px; border-color: Theme.border;
+                ListView {
+                    x: 0; y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    for si in Logic.side-items: Rectangle {
+                        height: 26px;
+                        width: parent.width;
+                        if (si.kind >= 3) : Text {
+                            x: 10px;
+                            y: 2px;
+                            height: 22px;
+                            text: si.label;
+                            font-size: 11px;
+                            color: Theme.fg-muted;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        // 远程访问段头旁的添加按钮（侧栏固定 200px 宽，坐标显式化避坑）
+                        if (si.label == "远程访问") : ToolBtn {
+                            x: 174px;
+                            y: 3px;
+                            glyph: "＋";
+                            tip: "添加远程访问";
+                            width: 20px;
+                            height: 20px;
+                            clicked => {
+                                Logic.dialog-input = "";
+                                Logic.dialog-input2 = "";
+                                Logic.dialog-mode = 7;
+                            }
+                        }
+                        if (si.kind < 3) : SideRow {
+                            item: si;
+                            width: parent.width;
+                            clicked => { Logic.sidebar-open(si); }
+                            context(mx, my) => {
+                                Logic.menu-mode = 2;
+                                Logic.menu-side-path = si.path;
+                                Logic.menu-x = mx;
+                                Logic.menu-y = my;
+                                context-menu.show();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 文件区
+            file-area := Rectangle {
+                min-width: 300px;
+                background: Theme.bg;
+
+                // 搜索结果视图
+                if (Logic.search-active) : Rectangle {
+                    x: 0; y: 0;
+                    width: 100%;
+                    height: 100%;
+                    Rectangle {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width;
+                        height: 26px;
+                        background: Theme.searchbar-bg;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            spacing: 8px;
+                            // 多选模式：全选框（固定像素偏移，禁用 parent.height 绑定——布局塌缩坑）
+                            Rectangle {
+                                width: Logic.multi-mode ? 18px : 0px;
+                                Rectangle {
+                                    x: 1px;
+                                    y: 5px;
+                                    width: 16px;
+                                    height: 16px;
+                                    border-radius: 3px;
+                                    border-width: 1px;
+                                    border-color: (Logic.status-selected > 0 && Logic.status-selected >= Logic.status-count) ? Theme.accent : Theme.checkbox-border;
+                                    background: (Logic.status-selected > 0 && Logic.status-selected >= Logic.status-count) ? Theme.accent : Theme.checkbox-bg;
+                                    Text {
+                                        text: "√";
+                                        color: white;
+                                        font-size: 12px;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    TouchArea {
+                                        clicked => {
+                                            Logic.multi-toggle-all(
+                                                !(Logic.status-count > 0
+                                                    && Logic.status-selected >= Logic.status-count));
+                                        }
+                                        mouse-cursor: pointer;
+                                    }
+                                }
+                            }
+                            Text {
+                                text: Logic.searching
+                                    ? "正在搜索 " + Logic.search-root + " …"
+                                    : "搜索结果（" + Logic.search-root + "）";
+                                font-size: 12px;
+                                color: Theme.searchbar-fg;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                width: parent.width - 70px;
+                            }
+                            ToolBtn {
+                                glyph: "×";
+                                tip: "关闭搜索结果";
+                                width: 22px;
+                                height: 22px;
+                                clicked => { Logic.search-cancel(); }
+                            }
+                        }
+                    }
+                    ListView {
+                        y: 26px;
+                        width: parent.width;
+                        height: parent.height - 26px;
+                        for e in Logic.search-results: EntryRow {
+                            entry: e;
+                            multi: Logic.multi-mode;
+                            width: parent.width;
+                            clicked(ctrl) => { Logic.entry-click(e, ctrl); }
+                            open => { Logic.entry-open(e); }
+                            context(mx, my) => {
+                                Logic.entry-context(e);
+                                Logic.menu-mode = 0;
+                                Logic.menu-entry = e;
+                                Logic.menu-x = mx;
+                                Logic.menu-y = my;
+                                context-menu.show();
+                            }
+                        }
+                    }
+                }
+
+                // 普通视图
+                if (!Logic.search-active) : Rectangle {
+                    x: 0; y: 0;
+                    width: 100%;
+                    height: 100%;
+
+                    // 空目录提示
+                    if (Logic.entries.length == 0) : Text {
+                        y: 80px;
+                        width: 100%;
+                        text: "此文件夹为空";
+                        color: Theme.fg-muted;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                    }
+
+                    // 列表头
+                    if (!Logic.grid-view) : Rectangle {
+                        y: 0px;
+                        width: 100%;
+                        height: 28px;
+                        background: Theme.header-bg;
+                        border-width: 1px; border-color: Theme.border-light;
+                        HorizontalLayout {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            // 多选模式：全选框
+                            Rectangle {
+                                width: Logic.multi-mode ? 26px : 0px;
+                                Rectangle {
+                                    x: 4px;
+                                    y: 6px;
+                                    width: 16px;
+                                    height: 16px;
+                                    border-radius: 3px;
+                                    border-width: 1px;
+                                    border-color: (Logic.status-selected > 0 && Logic.status-selected >= Logic.status-count) ? Theme.accent : Theme.checkbox-border;
+                                    background: (Logic.status-selected > 0 && Logic.status-selected >= Logic.status-count) ? Theme.accent : Theme.checkbox-bg;
+                                    Text {
+                                        text: "√";
+                                        color: white;
+                                        font-size: 12px;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    TouchArea {
+                                        clicked => {
+                                            Logic.multi-toggle-all(
+                                                !(Logic.status-count > 0
+                                                    && Logic.status-selected >= Logic.status-count));
+                                        }
+                                        mouse-cursor: pointer;
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                width: parent.width - (Logic.multi-mode ? 370px : 344px);
+                                ht := TouchArea { clicked => { Logic.sort-changed(0); } mouse-cursor: pointer; }
+                                Text { x: 26px; text: Logic.sort-by == 0 ? (Logic.sort-asc ? "名称 ▲" : "名称 ▼") : "名称"; font-size: 12px; color: Theme.fg-secondary; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                width: 138px;
+                                ht2 := TouchArea { clicked => { Logic.sort-changed(3); } mouse-cursor: pointer; }
+                                Text { text: Logic.sort-by == 3 ? (Logic.sort-asc ? "修改时间 ▲" : "修改时间 ▼") : "修改时间"; font-size: 12px; color: Theme.fg-secondary; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                width: 100px;
+                                ht3 := TouchArea { clicked => { Logic.sort-changed(2); } mouse-cursor: pointer; }
+                                Text { text: Logic.sort-by == 2 ? (Logic.sort-asc ? "类型 ▲" : "类型 ▼") : "类型"; font-size: 12px; color: Theme.fg-secondary; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                width: 90px;
+                                ht4 := TouchArea { clicked => { Logic.sort-changed(1); } mouse-cursor: pointer; }
+                                Text { text: Logic.sort-by == 1 ? (Logic.sort-asc ? "大小 ▲" : "大小 ▼") : "大小"; font-size: 12px; color: Theme.fg-secondary; horizontal-alignment: right; vertical-alignment: center; }
+                            }
+                        }
+                    }
+
+                    // 背景右键（条目下方空白处）
+                    if (!Logic.grid-view && Logic.entries.length > 0) : Rectangle {
+                        y: 28px;
+                        width: 100%;
+                        height: parent.height - 28px;
+                        bg := TouchArea {
+                            pointer-event(pe) => {
+                                if (pe.kind == PointerEventKind.up && pe.button == PointerEventButton.right) {
+                                    Logic.menu-mode = 1;
+                                    Logic.menu-x = self.absolute-position.x + self.pressed-x;
+                                    Logic.menu-y = self.absolute-position.y + self.pressed-y;
+                                    context-menu.show();
+                                }
+                            }
+                        }
+                    }
+
+                    // 列表视图
+                    if (!Logic.grid-view && Logic.entries.length > 0) : ListView {
+                        y: 28px;
+                        width: 100%;
+                        height: parent.height - 28px;
+                        for e in Logic.entries: EntryRow {
+                            entry: e;
+                            multi: Logic.multi-mode;
+                            width: parent.width;
+                            clicked(ctrl) => { Logic.entry-click(e, ctrl); }
+                            open => { Logic.entry-open(e); }
+                            context(mx, my) => {
+                                Logic.entry-context(e);
+                                Logic.menu-mode = 0;
+                                Logic.menu-entry = e;
+                                Logic.menu-x = mx;
+                                Logic.menu-y = my;
+                                context-menu.show();
+                            }
+                        }
+                    }
+
+                    // 宫格视图
+                    if (Logic.grid-view && Logic.entries.length > 0) : ListView {
+                        width: 100%;
+                        height: 100%;
+                        for row in Logic.grid-rows: Rectangle {
+                            height: 100px;
+                            width: parent.width;
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                padding-right: 4px;
+                                spacing: 4px;
+                                for e in row.items: EntryCell {
+                                    entry: e;
+                                    multi: Logic.multi-mode;
+                                    clicked(ctrl) => { Logic.entry-click(e, ctrl); }
+                                    open => { Logic.entry-open(e); }
+                                    context(mx, my) => {
+                                        Logic.entry-context(e);
+                                        Logic.menu-mode = 0;
+                                        Logic.menu-entry = e;
+                                        Logic.menu-x = mx;
+                                        Logic.menu-y = my;
+                                        context-menu.show();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+            // 预览面板（覆盖层：浮在文件区右侧，不参与布局）
+            if (Logic.preview-open) : Rectangle {
+                x: parent.width - 260px;
+                y: 0px;
+                width: 260px;
+                height: 100%;
+                background: Theme.header-bg;
+                border-width: 1px; border-color: Theme.border;
+                VerticalLayout {
+                    x: 0px; y: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    // 标题条
+                    Rectangle {
+                        height: 30px;
+                        HorizontalLayout {
+                            x: 0px; y: 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            padding-left: 10px;
+                            padding-right: 4px;
+                            Text {
+                                text: "预览";
+                                font-size: 12px;
+                                color: Theme.fg-secondary;
+                                vertical-alignment: center;
+                                width: parent.width - 30px;
+                            }
+                            ToolBtn {
+                                glyph: "×";
+                                tip: "关闭预览";
+                                width: 22px;
+                                height: 22px;
+                                clicked => { Logic.preview-close(); }
+                            }
+                        }
+                    }
+                    // 内容区
+                    Rectangle {
+                        // 图片预览
+                        if (Logic.preview-kind == 2) : Image {
+                            x: 8px;
+                            y: 8px;
+                            width: parent.width - 16px;
+                            height: parent.height - 16px;
+                            source: Logic.preview-image;
+                            image-fit: contain;
+                        }
+                        // 文本预览
+                        if (Logic.preview-kind == 1) : ScrollView {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            Text {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                text: Logic.preview-text;
+                                font-size: 12px;
+                                color: Theme.fg;
+                                wrap: word-wrap;
+                            }
+                        }
+                        // 元信息
+                        if (Logic.preview-kind == 0) : Text {
+                            x: 10px;
+                            y: 10px;
+                            width: parent.width - 20px;
+                            height: parent.height - 20px;
+                            text: Logic.preview-meta;
+                            font-size: 12px;
+                            color: Theme.fg-secondary;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- 状态栏 ----
+        Rectangle {
+            height: 26px;
+            background: Theme.side-bg;
+            border-width: 1px; border-color: Theme.border;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 16px;
+                Text {
+                    text: Logic.searching ? "🔍 搜索中…（可取消）" : (Logic.busy ? "处理中…" : "\{Logic.status-count} 项 · 已选 \{Logic.status-selected} 项 \{Logic.status-size}");
+                    font-size: 12px;
+                    color: Theme.fg-secondary;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Rectangle {}
+                Text {
+                    text: Logic.current-path;
+                    font-size: 11px;
+                    color: Theme.fg-muted;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    width: 224px;
+                }
+            }
+        }
+    }
+
+    // ---- 右键菜单 ----
+    // 宽度显式 230px：容纳最长项「解压到当前目录（zip/7z/tar/gz/xz）」（实测文字 205px+内距），
+    // PopupWindow 非布局上下文中无显式宽的 Rectangle 会塌缩为 0 导致文字画到 popup 白底上
+    context-menu := PopupWindow {
+        x: min(max(Logic.menu-x, 0px), root.width - 238px);
+        y: min(max(Logic.menu-y, 0px), root.height - 556px);
+        width: 230px;
+
+        Rectangle {
+            width: parent.width;
+            // mode0 条目菜单：基础 14 行 ≈ 484px（多选 +1 行、搜索视图 +「在新标签显示」行）；
+            // mode1 背景 6 行 ≈ 212px；mode2 收藏 2 行 ≈ 76px
+            height: Logic.menu-mode == 0 ? (Logic.multi-mode ? (Logic.search-active ? 552px : 518px) : (Logic.search-active ? 518px : 484px))
+                : (Logic.menu-mode == 1 ? 212px : 76px);
+            background: Theme.menu-bg;
+            border-radius: 6px;
+            border-width: 1px; border-color: Theme.border;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: rgba(0, 0, 0, 60);
+            VerticalLayout {
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 4px;
+                // 条目菜单 (mode 0)：打开/显示/复制/剪切/重命名/压缩/解压/哈希/删除
+                if (Logic.menu-mode == 0) : Rectangle {
+                    height: Logic.multi-mode ? (Logic.search-active ? 540px : 506px) : (Logic.search-active ? 506px : 472px);
+                    VerticalLayout {
+                        spacing: 4px;
+                        MenuRow { label: "打开"; clicked => { context-menu.close(); Logic.menu-action(1); } }
+                        if (Logic.search-active) : MenuRow { label: "在新标签显示"; clicked => { context-menu.close(); Logic.menu-action(22); } }
+                        MenuRow { label: "在资源管理器中显示"; clicked => { context-menu.close(); Logic.menu-action(2); } }
+                        MenuRow { label: "在终端打开"; clicked => { context-menu.close(); Logic.menu-action(18); } }
+                        MenuRow { label: "复制"; clicked => { context-menu.close(); Logic.menu-action(3); } }
+                        MenuRow { label: "剪切"; clicked => { context-menu.close(); Logic.menu-action(4); } }
+                        MenuRow { label: "重命名"; clicked => { context-menu.close(); Logic.menu-action(5); } }
+                        MenuRow { label: "批量重命名"; clicked => { context-menu.close(); Logic.menu-action(17); } }
+                        MenuRow { label: "压缩为 ZIP"; clicked => { context-menu.close(); Logic.menu-action(13); } }
+                        MenuRow { label: "压缩为 tar.gz"; clicked => { context-menu.close(); Logic.menu-action(14); } }
+                        MenuRow { label: "解压到当前目录（zip/7z/tar/gz/xz）"; clicked => { context-menu.close(); Logic.menu-action(15); } }
+                        if (Logic.multi-mode) : MenuRow { label: "批量解压到各自目录"; clicked => { context-menu.close(); Logic.menu-action(21); } }
+                        MenuRow { label: "计算哈希"; clicked => { context-menu.close(); Logic.menu-action(16); } }
+                        MenuRow { label: "查看路径"; clicked => { context-menu.close(); Logic.menu-action(19); } }
+                        MenuRow { label: "收藏此文件夹"; clicked => { context-menu.close(); Logic.menu-action(20); } }
+                        MenuRow { label: "删除到回收站"; danger: true; clicked => { context-menu.close(); Logic.menu-action(6); } }
+                    }
+                }
+                // 背景菜单 (mode 1)：粘贴/新建/刷新/收藏/显示
+                if (Logic.menu-mode == 1) : Rectangle {
+                    height: 200px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        MenuRow { label: "粘贴"; clicked => { context-menu.close(); Logic.menu-action(7); } }
+                        MenuRow { label: "新建文件夹"; clicked => { context-menu.close(); Logic.menu-action(8); } }
+                        MenuRow { label: "新建文件"; clicked => { context-menu.close(); Logic.menu-action(9); } }
+                        MenuRow { label: "刷新"; clicked => { context-menu.close(); Logic.menu-action(10); } }
+                        MenuRow { label: "收藏此文件夹"; clicked => { context-menu.close(); Logic.menu-action(11); } }
+                        MenuRow { label: "在资源管理器中显示"; clicked => { context-menu.close(); Logic.menu-action(2); } }
+                    }
+                }
+                // 收藏项菜单 (mode 2)
+                if (Logic.menu-mode == 2) : Rectangle {
+                    height: 64px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        MenuRow { label: "打开"; clicked => { context-menu.close(); Logic.menu-action(1); } }
+                        MenuRow { label: "移除收藏"; danger: true; clicked => { context-menu.close(); Logic.menu-action(12); } }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- 输入对话框（重命名 / 新建 / 路径跳转；批量重命名走 mode 5 专用对话框）----
+    if (Logic.dialog-mode >= 1 && Logic.dialog-mode <= 4) : Rectangle {
+        width: root.width;
+        height: root.height;
+        background: Theme.overlay;
+        TouchArea { clicked => { Logic.dialog-cancel(); } }  // 点外部取消
+        Rectangle {
+            width: 380px;
+            height: 130px;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            background: Theme.card-bg;
+            border-radius: 8px;
+            drop-shadow-blur: 14px;
+            drop-shadow-color: rgba(0, 0, 0, 90);
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+                Text {
+                    text: Logic.dialog-mode == 1 ? "重命名"
+                        : Logic.dialog-mode == 2 ? "新建文件夹"
+                        : Logic.dialog-mode == 3 ? "新建文件"
+                        : "跳转到路径";
+                    font-size: 14px;
+                    font-weight: 700;
+                    color: Theme.fg;
+                }
+                dialog-edit := LineEdit {
+                    text <=> Logic.dialog-input;
+                    font-size: 13px;
+                    accepted(text) => { Logic.dialog-ok(text); }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Rectangle {
+                        width: 64px; height: 28px;
+                        border-radius: 4px;
+                        border-width: 1px; border-color: Theme.border;
+                        background: ct.has-hover ? Theme.btn-hover : Theme.btn-bg;
+                        ct := TouchArea { clicked => { Logic.dialog-cancel(); } mouse-cursor: pointer; }
+                        Text { text: "取消"; font-size: 13px; color: Theme.fg-secondary; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        width: 64px; height: 28px;
+                        border-radius: 4px;
+                        background: okt.has-hover ? Theme.accent-hover : Theme.accent;
+                        okt := TouchArea { clicked => { Logic.dialog-ok(Logic.dialog-input); } mouse-cursor: pointer; }
+                        Text { text: "确定"; font-size: 13px; color: #FFF; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- 查看路径对话框（mode 6）----
+    if (Logic.dialog-mode == 6) : Rectangle {
+        width: root.width;
+        height: root.height;
+        background: Theme.overlay;
+        TouchArea { clicked => { Logic.dialog-cancel(); } }
+        Rectangle {
+            width: 420px;
+            height: 150px;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            background: Theme.card-bg;
+            border-radius: 8px;
+            drop-shadow-blur: 14px;
+            drop-shadow-color: rgba(0, 0, 0, 90);
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+                Text {
+                    text: "完整路径";
+                    font-size: 14px;
+                    font-weight: 700;
+                    color: Theme.fg;
+                }
+                Rectangle {
+                    height: 44px;
+                    border-radius: 4px;
+                    background: Theme.input-bg;
+                    border-width: 1px; border-color: Theme.border;
+                    clip: true;
+                    // 覆盖层方案（不参与布局，避免首选高度循环）
+                    ScrollView {
+                        x: 0; y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        Text {
+                            text: Logic.dialog-path;
+                            font-size: 12px;
+                            color: Theme.fg;
+                            wrap: word-wrap;
+                            x: 8px; y: 6px;
+                            width: parent.width - 16px;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Rectangle {
+                        width: 64px; height: 28px;
+                        border-radius: 4px;
+                        border-width: 1px; border-color: Theme.border;
+                        background: pct.has-hover ? Theme.btn-hover : Theme.btn-bg;
+                        pct := TouchArea { clicked => { Logic.dialog-cancel(); } mouse-cursor: pointer; }
+                        Text { text: "关闭"; font-size: 13px; color: Theme.fg-secondary; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        width: 64px; height: 28px;
+                        border-radius: 4px;
+                        background: pokt.has-hover ? Theme.accent-hover : Theme.accent;
+                        pokt := TouchArea { clicked => { Logic.copy-dialog-path(); } mouse-cursor: pointer; }
+                        Text { text: "复制"; font-size: 13px; color: #FFF; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- 添加远程访问对话框（mode 7）----
+    if (Logic.dialog-mode == 7) : Rectangle {
+        width: root.width;
+        height: root.height;
+        background: Theme.overlay;
+        TouchArea { clicked => { Logic.dialog-cancel(); } }
+        Rectangle {
+            width: 420px;
+            height: 300px;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            background: Theme.card-bg;
+            border-radius: 8px;
+            drop-shadow-blur: 14px;
+            drop-shadow-color: rgba(0, 0, 0, 90);
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                Text {
+                    text: "添加远程访问";
+                    font-size: 14px;
+                    font-weight: 700;
+                    color: Theme.fg;
+                }
+                Text {
+                    text: "地址（类型自动识别）：\\\\host\\share · ftp:// · http(s):// · dlna://";
+                    font-size: 11px;
+                    color: Theme.fg-muted;
+                }
+                r-url := LineEdit {
+                    text <=> Logic.dialog-input;
+                    font-size: 13px;
+                    placeholder-text: "例如 \\\\NAS\\media 或 ftp://192.168.1.10";
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "账号"; width: 42px; font-size: 12px; color: Theme.fg-secondary; vertical-alignment: center; }
+                    r-user := LineEdit {
+                        text <=> Logic.dialog-input3;
+                        font-size: 13px;
+                        placeholder-text: "留空 = 匿名";
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "密码"; width: 42px; font-size: 12px; color: Theme.fg-secondary; vertical-alignment: center; }
+                    r-pass := LineEdit {
+                        text <=> Logic.dialog-input4;
+                        font-size: 13px;
+                        input-type: InputType.password;
+                        placeholder-text: "密码（仅本机配置文件保存）";
+                    }
+                }
+                r-name := LineEdit {
+                    text <=> Logic.dialog-input2;
+                    font-size: 13px;
+                    placeholder-text: "显示名（留空自动取自地址）";
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Rectangle {
+                        width: 64px; height: 28px;
+                        border-radius: 4px;
+                        border-width: 1px; border-color: Theme.border;
+                        background: rct.has-hover ? Theme.btn-hover : Theme.btn-bg;
+                        rct := TouchArea { clicked => { Logic.dialog-cancel(); } mouse-cursor: pointer; }
+                        Text { text: "取消"; font-size: 13px; color: Theme.fg-secondary; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        width: 64px; height: 28px;
+                        border-radius: 4px;
+                        background: rokt.has-hover ? Theme.accent-hover : Theme.accent;
+                        rokt := TouchArea {
+                            clicked => { Logic.remote-add(Logic.dialog-input, Logic.dialog-input2, Logic.dialog-input3, Logic.dialog-input4); }
+                            mouse-cursor: pointer;
+                        }
+                        Text { text: "添加"; font-size: 13px; color: #FFF; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- 批量重命名对话框（mode 5）----
+    if (Logic.dialog-mode == 5) : Rectangle {
+        width: root.width;
+        height: root.height;
+        background: Theme.overlay;
+        TouchArea { clicked => { Logic.dialog-cancel(); } }
+        Rectangle {
+            width: 560px;
+            height: 420px;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            background: Theme.card-bg;
+            border-radius: 8px;
+            drop-shadow-blur: 14px;
+            drop-shadow-color: rgba(0, 0, 0, 90);
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                Text {
+                    text: Logic.batch-title;
+                    font-size: 14px;
+                    font-weight: 700;
+                    color: Theme.fg;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "模板"; width: 56px; font-size: 13px; color: Theme.fg-secondary; vertical-alignment: center; }
+                    batch-tpl := LineEdit {
+                        text <=> Logic.dialog-input;
+                        font-size: 13px;
+                        edited(text) => { Logic.batch-preview(text, Logic.batch-start-input); }
+                        accepted(text) => { Logic.batch-apply(text, Logic.batch-start-input); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "起始序号"; width: 56px; font-size: 13px; color: Theme.fg-secondary; vertical-alignment: center; }
+                    batch-start := LineEdit {
+                        text <=> Logic.batch-start-input;
+                        font-size: 13px;
+                        edited(text) => { Logic.batch-preview(Logic.dialog-input, text); }
+                        accepted(text) => { Logic.batch-apply(Logic.dialog-input, text); }
+                    }
+                    Text {
+                        text: "%d 序号 %c 字母序号 %s/%e/%f 原名 %s 扩展名 %e %{Y} 年 %{m} 月 %{d} 日";
+                        font-size: 11px;
+                        color: Theme.fg-muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                }
+                if (Logic.batch-error != "") : Text {
+                    text: Logic.batch-error;
+                    font-size: 12px;
+                    color: Theme.danger;
+                    wrap: word-wrap;
+                }
+                Rectangle {
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    clip: true;
+                    vertical-stretch: 1;
+                    ListView {
+                        for r in Logic.batch-rows : Rectangle {
+                            height: 24px;
+                            width: parent.width;
+                            Text {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                text: r.error != "" ? r.old + "   ✕ " + r.error
+                                    : r.conflict ? r.old + "  →  " + r.new + "   ⚠ 重名"
+                                    : r.unchanged ? r.old + "  →  （不变）"
+                                    : r.old + "  →  " + r.new;
+                                font-size: 12px;
+                                color: r.error != "" || r.conflict ? Theme.danger : (r.unchanged ? Theme.fg-muted : Theme.fg);
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Rectangle {
+                        width: 64px; height: 28px;
+                        border-radius: 4px;
+                        border-width: 1px; border-color: Theme.border;
+                        background: bct.has-hover ? Theme.btn-hover : Theme.btn-bg;
+                        bct := TouchArea { clicked => { Logic.dialog-cancel(); } mouse-cursor: pointer; }
+                        Text { text: "取消"; font-size: 13px; color: Theme.fg-secondary; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        width: 64px; height: 28px;
+                        border-radius: 4px;
+                        background: bat.has-hover ? Theme.accent-hover : Theme.accent;
+                        bat := TouchArea { clicked => { Logic.batch-apply(Logic.dialog-input, Logic.batch-start-input); } mouse-cursor: pointer; }
+                        Text { text: "应用"; font-size: 13px; color: #FFF; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- 设置对话框（mode 8）：色调 / 快捷键 / 搜索后缀筛选 / 管理员提示 ----
+    if (Logic.dialog-mode == 8) : Rectangle {
+        width: root.width;
+        height: root.height;
+        background: Theme.overlay;
+        TouchArea { clicked => { Logic.dialog-cancel(); } }
+        Rectangle {
+            width: 480px;
+            height: 470px;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            background: Theme.card-bg;
+            border-radius: 8px;
+            drop-shadow-blur: 14px;
+            drop-shadow-color: rgba(0, 0, 0, 90);
+            VerticalLayout {
+                padding: 16px;
+                spacing: 8px;
+                Text { text: "设置"; font-size: 14px; font-weight: 700; color: Theme.fg; }
+                // 色调模式
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "界面色调"; width: 64px; font-size: 12px; color: Theme.fg-secondary; vertical-alignment: center; }
+                    ComboBox {
+                        width: 120px;
+                        height: 26px;
+                        model: ["浅色", "深色", "跟随系统"];
+                        current-index <=> Logic.settings-theme;
+                        changed current-index => { Logic.settings-theme-changed(self.current-index); }
+                    }
+                    Rectangle {}
+                    // 管理员提示开关
+                    adm-ck := Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        y: 5px;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: Logic.settings-admin ? Theme.accent : Theme.checkbox-border;
+                        background: Logic.settings-admin ? Theme.accent : Theme.checkbox-bg;
+                        Text {
+                            text: "√"; color: white; font-size: 12px;
+                            width: parent.width; height: parent.height;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            visible: Logic.settings-admin;
+                        }
+                        TouchArea {
+                            clicked => { Logic.settings-admin-changed(!Logic.settings-admin); }
+                            mouse-cursor: pointer;
+                        }
+                    }
+                    Text { text: "启动时提示以管理员身份运行"; width: 170px; font-size: 12px; color: Theme.fg-secondary; vertical-alignment: center; }
+                }
+                // 快捷键
+                Text { text: "快捷键（点击「改」后按下新键，Esc 取消）"; font-size: 12px; color: Theme.fg-secondary; }
+                Rectangle {
+                    height: 150px;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    clip: true;
+                    ListView {
+                        for h in Logic.hotkey-rows : Rectangle {
+                            height: 26px;
+                            width: parent.width;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 6px;
+                                spacing: 6px;
+                                Text {
+                                    text: Logic.capture-action == h.action ? "按下新键…（Esc 取消）" : h.action;
+                                    font-size: 12px;
+                                    color: Logic.capture-action == h.action ? Theme.accent : Theme.fg;
+                                    width: parent.width - 150px;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle {
+                                    width: 92px;
+                                    height: 20px;
+                                    y: 3px;
+                                    border-radius: 3px;
+                                    background: Theme.input-bg;
+                                    border-width: 1px; border-color: Theme.border;
+                                    Text {
+                                        text: h.key;
+                                        font-size: 11px;
+                                        color: Theme.fg-secondary;
+                                        width: parent.width; height: parent.height;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                                Rectangle {
+                                    width: 42px;
+                                    height: 20px;
+                                    y: 3px;
+                                    border-radius: 3px;
+                                    background: hkt.has-hover ? Theme.btn-hover : Theme.btn-bg;
+                                    border-width: 1px; border-color: Theme.border;
+                                    hkt := TouchArea { clicked => { Logic.hotkey-capture(h.idx); } mouse-cursor: pointer; }
+                                    Text {
+                                        text: "改";
+                                        font-size: 11px; color: Theme.fg;
+                                        width: parent.width; height: parent.height;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // 搜索后缀筛选类型
+                Text { text: "搜索后缀筛选类型（下拉框选项，可增删）"; font-size: 12px; color: Theme.fg-secondary; }
+                Rectangle {
+                    height: 110px;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    clip: true;
+                    ListView {
+                        for f in Logic.ext-rows : Rectangle {
+                            height: 26px;
+                            width: parent.width;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 6px;
+                                spacing: 6px;
+                                Text {
+                                    text: f.label;
+                                    font-size: 12px;
+                                    color: Theme.fg;
+                                    width: 80px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: f.exts == "" ? "（全部）" : f.exts;
+                                    font-size: 11px;
+                                    color: Theme.fg-muted;
+                                    width: parent.width - 110px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Rectangle {
+                                    width: 42px;
+                                    height: 20px;
+                                    border-radius: 3px;
+                                    background: edt.has-hover ? Theme.btn-hover : Theme.btn-bg;
+                                    border-width: 1px; border-color: Theme.border;
+                                    edt := TouchArea { clicked => { Logic.ext-edit(f.idx); } mouse-cursor: pointer; }
+                                    Text {
+                                        text: "改";
+                                        font-size: 11px; color: Theme.fg;
+                                        width: parent.width; height: parent.height;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                                Rectangle {
+                                    width: 42px;
+                                    height: 20px;
+                                    y: 3px;
+                                    border-radius: 3px;
+                                    background: fdt.has-hover ? Theme.btn-hover : Theme.btn-bg;
+                                    border-width: 1px; border-color: Theme.border;
+                                    fdt := TouchArea { clicked => { Logic.ext-del(f.idx); } mouse-cursor: pointer; }
+                                    Text {
+                                        text: "删";
+                                        font-size: 11px; color: Theme.danger;
+                                        width: parent.width; height: parent.height;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    se-label := LineEdit {
+                        width: 110px;
+                        text <=> Logic.settings-ext-label-input;
+                        font-size: 12px;
+                        placeholder-text: "名称";
+                    }
+                    se-ext := LineEdit {
+                        horizontal-stretch: 1;
+                        text <=> Logic.settings-ext-input;
+                        font-size: 12px;
+                        placeholder-text: "扩展名，分号分隔（如 jpg;png；留空=全部）";
+                        accepted(text) => { Logic.ext-add(Logic.settings-ext-label-input, Logic.settings-ext-input); }
+                    }
+                    Rectangle {
+                        width: 42px;
+                        height: 24px;
+                        border-radius: 3px;
+                        background: set.has-hover ? Theme.accent-hover : Theme.accent;
+                        set := TouchArea {
+                            clicked => { Logic.ext-add(Logic.settings-ext-label-input, Logic.settings-ext-input); }
+                            mouse-cursor: pointer;
+                        }
+                        Text {
+                            text: Logic.ext-edit-idx >= 0 ? "存" : "加";
+                            font-size: 11px; color: white;
+                            width: parent.width; height: parent.height;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+                }
+                if (Logic.settings-error != "") : Text {
+                    text: Logic.settings-error;
+                    font-size: 12px;
+                    color: Theme.danger;
+                    overflow: elide;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    Rectangle {
+                        width: 64px; height: 28px;
+                        border-radius: 4px;
+                        background: stc.has-hover ? Theme.accent-hover : Theme.accent;
+                        stc := TouchArea { clicked => { Logic.dialog-cancel(); } mouse-cursor: pointer; }
+                        Text { text: "关闭"; font-size: 13px; color: #FFF; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- 提示（错误红 / 成功绿） ----
+    if (Logic.has-toast) : Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: parent.height - 60px;
+        width: min(560px, parent.width - 40px);
+        height: 34px;
+        border-radius: 6px;
+        background: Logic.toast-error ? #FDECEC : #E6F4EA;
+        border-width: 1px; border-color: Logic.toast-error ? #F5C6C4 : #B7DFC0;
+        Text {
+            x: 12px;
+            width: parent.width - 24px;
+            text: Logic.toast;
+            font-size: 12px;
+            color: Logic.toast-error ? Theme.danger : #1E7E34;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+        TouchArea {
+            clicked => { Logic.menu-action(99); }  // 99 = 清除提示
+        }
+    }
+
+    // ---- tooltip 浮层（Window 最后一个子元素 = 最上层；常驻元素 + visible 控制）----
+    Rectangle {
+        visible: Logic.tip-text != "";
+        // 宽度上限 ~260px：右缘附近时向左收
+        x: min(max(Logic.tip-x, 4px), root.width - 264px);
+        y: Logic.tip-y;
+        width: tip-o.preferred-width + 18px;
+        height: 22px;
+        border-radius: 4px;
+        background: #2B2F3A;
+        border-width: 1px; border-color: #4A5065;
+        tip-o := Text {
+            x: 9px;
+            height: parent.height;
+            text: Logic.tip-text;
+            font-size: 11px;
+            color: #F2F4F8;
+            vertical-alignment: center;
+        }
+    }
+}
