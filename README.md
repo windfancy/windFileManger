@@ -26,21 +26,20 @@
 - serde / toml / chrono
 - windows-sys（Win32 API）
 - rustls（WebDAV / DLNA 的 HTTPS，ring 后端）
-- windsakinfe（本地路径依赖，见下）
+- windsakinfe（仓库内 `windSAkinfe/` 副本，路径依赖）
 
 ## 构建与运行
 
 需要 Rust 稳定版工具链和 Windows SDK 环境。
 
-本项目的压缩/哈希能力以**同级目录源码依赖**方式引用 `windSAkinfe`：
+本项目的压缩/哈希能力来自仓库内自带的 `windSAkinfe/` 源码副本，以路径依赖方式引用（`path = "windSAkinfe"`）。clone 后即可构建，不需要再单独取得外部工程：
 
 ```
-D:\github\
-├── windFileManger\
-└── windSAkinfe\
+windFileManger/
+├── Cargo.toml
+├── windSAkinfe/          # 内置源码副本（压缩/哈希/编码算法）
+└── ...
 ```
-
-请先取得 `windSAkinfe` 源码并放在 `windFileManger` 同级目录，否则 `Cargo.toml` 中的 `path = "../windSAkinfe"` 会构建失败。
 
 ```powershell
 cd D:\github\windFileManger
@@ -79,6 +78,7 @@ windFileManger/
 │   └── tasks.rs             # 后台任务与取消
 ├── tests/                   # 测试
 ├── docs/                    # 功能规格与迭代记录
+├── windSAkinfe/             # 内置源码副本（路径依赖）
 └── assets/                  # 图标
 ```
 

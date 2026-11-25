@@ -1,0 +1,23 @@
+[package]
+name = "windsakinfe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "windSAkinfe - 批量文件操作瑞士军刀（压缩/哈希/编码算法全部自研）"
+license = "MIT"
+
+# 包名走 snake_case 规避 cargo 告警，产物名保持品牌拼写
+[[bin]]
+name = "windSAkinfe"
+path = "src/main.rs"
+
+# 唯一第三方依赖：仅做命令行解析（非算法）
+[dependencies]
+clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"
